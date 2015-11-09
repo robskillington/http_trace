@@ -1,4 +1,4 @@
-{   "name" : "http_trace",
+{   "name" : "rhttp_trace",
     "version" : "0.5.0",
     "description" : "Live HTTP packet capture and protocol decoding",
     "author": "Matt Ranney <mjr@ranney.com>",
