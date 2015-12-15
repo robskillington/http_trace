@@ -10,8 +10,9 @@ var HTTPSession = require("./http_session");
 var node_http = require("http");
 var pcap = require("pcap");
 var pcap_session, ANSI, options = {};
+var forwarding = {};
 var ANSI = require("./ansi");
-   
+
 function lpad(num, len) {
     var str = num.toString();
 
@@ -46,7 +47,7 @@ function format_line_start(session, send) {
 
 function format_headers(headers) {
     var matched = [], keys = Object.keys(headers);
-    
+
     if (options.headers) {
         matched = keys;
     } else if (Array.isArray(options["show-header"])) {
@@ -56,7 +57,7 @@ function format_headers(headers) {
             });
         });
     }
-    
+
     if (matched.length === 0) {
         return;
     }
@@ -131,9 +132,12 @@ function usage_die(message) {
     console.error("    --headers                print all headers of request and response (def: off)");
     console.error("    --show-header            print only headers that match regex (def: off)");
     console.error("    --bodies                 print request and response bodies, if any (def: off)");
-//    console.error("    --group                  group all output for req/res (def: progressive)");
     console.error("    --tcp-verbose            display TCP events (def: off)");
     console.error("    --no-color               disable ANSI colors (def: pretty colors on)");
+    console.error("");
+    console.error("HTTP forwarding:");
+    console.error("    --forward <host:port>           forward intercepted requests to a target");
+    console.error("    --forward-url-rewrite <replace> rewrite the url filtered by the --url regex with String.replace format");
     console.error("");
     console.error("Examples:");
     console.error("    http_trace -f \"tcp port 80\"");
@@ -146,7 +150,7 @@ function usage_die(message) {
 }
 
 function parse_options() {
-    var argv_slice = process.argv.slice(2), 
+    var argv_slice = process.argv.slice(2),
         optnum = 0, opt, optname,
         state = "match optname", matches,
         valid_options;
@@ -166,9 +170,10 @@ function parse_options() {
         "headers": { multiple: false, has_value: false },
         "show-header": { multiple: true, has_value: true, regex: true },
         "bodies": { multiple: false, has_value: false },
-//        "group": { multiple: false, has_value: false },
         "tcp-verbose": { multiple: false, has_value: false },
         "no-color": { multiple: false, has_value: false },
+        "forward": { multiple: false, has_value: true },
+        "forward-url-rewrite": { multiple: false, has_value: true },
         "help": { multiple: false, has_value: false }
     };
 
@@ -193,7 +198,7 @@ function parse_options() {
 
     while (optnum < argv_slice.length) {
         opt = argv_slice[optnum];
-        
+
         if (state === "match optname") {
             matches = opt.match(/^[\-]{1,2}([^\-].*)/);
             if (matches !== null) {
@@ -220,7 +225,7 @@ function parse_options() {
         } else {
             throw new Error("Unknown state " + state + " in options parser");
         }
-        
+
         optnum += 1;
     }
     if (state === "match optval") {
@@ -252,7 +257,7 @@ function filter_match(http) {
             return false;
         });
     }  // if no show filters, then everything "matches"
-    
+
     if (hide_filters.length > 0) {
         show = !hide_filters.some(function (filter_pair) {
             if (typeof filter_pair[1] === "object") {
@@ -263,7 +268,7 @@ function filter_match(http) {
             return false;
         });
     }
-    
+
     return show;
 }
 
@@ -271,6 +276,30 @@ function privs_check() {
     if (process.getuid() !== 0) {
         console.log(ANSI.bold(ANSI.red("Warning: not running with root privs, which are usually required for raw packet capture.")));
         console.log(ANSI.red("Trying to open anyway..."));
+    }
+}
+
+function setup_forward() {
+    if (options.forward) {
+        var host_port = options.forward.split(':');
+        forwarding.host = host_port[0];
+        if (host_port.length > 1) {
+            forwarding.port = parseInt(host_port[1], 10);
+            if (isNaN(forwarding.port)) {
+                forwarding.port = 80;
+            }
+        } else {
+            forwarding.port = 80;
+        }
+        forwarding.rewrite = options["forward-url-rewrite"];
+
+        if (!forwarding.rewrite) {
+            console.log("Forwarding all requests to " + forwarding.host + ":" + forwarding.port);
+        } else {
+            console.log(
+                "Forwarding all requests to " + forwarding.host + ":" + forwarding.port +
+                " URLs rewritten " + options.url +  " to " + forwarding.rewrite);
+        }
     }
 }
 
@@ -371,11 +400,33 @@ function on_tcp_session(tcp_session) {
         }
 
         var req = session.request;
-        console.log(format_line_start(tcp_session, true) + " #" + session.request_count + " HTTP " + req.http_version + " request: " + 
+        console.log(format_line_start(tcp_session, true) + " #" + session.request_count + " HTTP " + req.http_version + " request: " +
             ANSI.yellow(ANSI.bold(req.method) + " " + req.url));
 
         format_headers(req.headers);
         req.binary_body = binary_body_check(req.headers);
+
+        if (options.forward) {
+            var path;
+            if (forwarding.rewrite) {
+                path = req.url.replace(options.url, forwarding.rewrite);
+            } else {
+                path = req.url;
+            }
+            session.forward_request = node_http.request({
+                hostname: forwarding.host,
+                port: forwarding.port,
+                path: path,
+                method: req.method,
+                headers: req.headers
+            });
+            session.forward_request.on('error', function onRequestError(e) {
+                console.error('forward request error: ' + e.message);
+            });
+            console.log(format_timestamp(tcp_session.current_cap_time) + " forwarding HTTP " +
+                req.http_version + " request to " + forwarding.host + ":" + forwarding.port + ": " +
+                ANSI.yellow(ANSI.bold(req.method) + " " + path));
+        }
     });
 
     http_session.on("http request body", function (session, data) {
@@ -384,7 +435,7 @@ function on_tcp_session(tcp_session) {
         }
 
         console.log(format_line_start(tcp_session, true) +
-            " #" + session.request_count + " HTTP " + session.request.http_version + " request body: " + 
+            " #" + session.request_count + " HTTP " + session.request.http_version + " request body: " +
             format_size(data.length));
 
         // TODO - need real binary_body check, more than just content-type
@@ -395,6 +446,10 @@ function on_tcp_session(tcp_session) {
                 console.log(format_json(data.toString("utf8")));
             }
         }
+
+        if (options.forward) {
+            session.forward_request.write(data);
+        }
     });
 
     http_session.on("http request complete", function (session) {
@@ -403,9 +458,13 @@ function on_tcp_session(tcp_session) {
         }
 
         if (session.request.body_len > 0 || session.request.method !== "GET") {
-            console.log(format_line_start(tcp_session, true) + 
+            console.log(format_line_start(tcp_session, true) +
                 " #" + session.request_count + " HTTP " + session.request.http_version + " request complete " +
                 format_size(session.request.body_len));
+        }
+
+        if (options.forward) {
+            session.forward_request.end();
         }
     });
 
@@ -428,7 +487,7 @@ function on_tcp_session(tcp_session) {
         }
 
         console.log(format_line_start(tcp_session, false) +
-            " #" + session.request_count + " HTTP " + session.response.http_version + " response body: " + 
+            " #" + session.request_count + " HTTP " + session.response.http_version + " response body: " +
             format_size(data.length));
 
         if (options.bodies && !session.response.binary_body) {
@@ -443,7 +502,7 @@ function on_tcp_session(tcp_session) {
         }
 
         console.log(format_line_start(tcp_session, false) +
-            " #" + session.request_count + " HTTP " + session.response.http_version + " response complete " + 
+            " #" + session.request_count + " HTTP " + session.response.http_version + " response complete " +
             format_size(session.response.body_len) + " " + (Date.now() - session.request.start) + "ms");
     });
 }
@@ -457,6 +516,7 @@ if (options.help) {
     usage_die();
 }
 privs_check();
+setup_forward();
 start_capture_session();
 start_drop_watcher();
 setup_listeners();

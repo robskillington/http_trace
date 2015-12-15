@@ -34,6 +34,7 @@ function HTTPSession(tcp_session) {
     this.request_parser = new HTTPParser(HTTPParser.REQUEST);
     this.response_parser = new HTTPParser(HTTPParser.RESPONSE);
     this.request_count = 0;
+    this.forward_request = null;
 
     this.tcp_session.src_name = lookup(this.tcp_session.src_name);
     this.tcp_session.dst_name = lookup(this.tcp_session.dst_name);
