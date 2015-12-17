@@ -9,8 +9,10 @@ var inspect = require("util").inspect;
 var HTTPSession = require("./http_session");
 var node_http = require("http");
 var pcap = require("pcap");
+var fs = require("fs");
 var pcap_session, ANSI, options = {};
 var forwarding = {};
+var log_stream = null;
 var ANSI = require("./ansi");
 
 function lpad(num, len) {
@@ -139,6 +141,9 @@ function usage_die(message) {
     console.error("    --forward <host:port>           forward intercepted requests to a target");
     console.error("    --forward-url-rewrite <replace> rewrite the url filtered by the --url regex with String.replace format");
     console.error("");
+    console.error("HTTP logging:");
+    console.error("    --log-json <file>           log requests JSON formatted to line separated log file");
+    console.error("");
     console.error("Examples:");
     console.error("    http_trace -f \"tcp port 80\"");
     console.error("       listen for TCP port 80 on the default device");
@@ -174,6 +179,7 @@ function parse_options() {
         "no-color": { multiple: false, has_value: false },
         "forward": { multiple: false, has_value: true },
         "forward-url-rewrite": { multiple: false, has_value: true },
+        "log-json": { multiple: false, has_value: true },
         "help": { multiple: false, has_value: false }
     };
 
@@ -301,6 +307,21 @@ function setup_forward() {
                 " URLs rewritten " + options.url +  " to " + forwarding.rewrite);
         }
     }
+}
+
+function setup_log(callback) {
+    var filename = options["log-json"];
+    if (!filename) {
+        return callback();
+    }
+
+    fs.open(filename, 'w+', function (err, fd) {
+        if (err) {
+            return callback('Unable to open file "' + filename + '": ' + err);
+        }
+        log_stream = fs.createWriteStream(filename, {fd: fd});
+        callback();
+    });
 }
 
 function start_capture_session() {
@@ -466,6 +487,16 @@ function on_tcp_session(tcp_session) {
         if (options.forward) {
             session.forward_request.end();
         }
+
+        if (log_stream) {
+            var req = session.request;
+            var entry = {
+                url: req.url,
+                method: req.method,
+                headers: req.headers,
+            };
+            log_stream.write(JSON.stringify(entry) + '\n');
+        }
     });
 
     http_session.on("http response", function (session) {
@@ -517,6 +548,12 @@ if (options.help) {
 }
 privs_check();
 setup_forward();
-start_capture_session();
-start_drop_watcher();
-setup_listeners();
+setup_log(function (err) {
+    if (err) {
+        console.err(err);
+        return;
+    }
+    start_capture_session();
+    start_drop_watcher();
+    setup_listeners();
+});
