@@ -491,9 +491,10 @@ function on_tcp_session(tcp_session) {
         if (log_stream) {
             var req = session.request;
             var entry = {
+                ts: Date.now(),
                 url: req.url,
                 method: req.method,
-                headers: req.headers,
+                headers: req.headers
             };
             log_stream.write(JSON.stringify(entry) + '\n');
         }
