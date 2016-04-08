@@ -7,6 +7,7 @@ var dns_cache = new DNSCache();
 function HTTPRequest() {
     this.start = null;
     this.headers = {};
+    this.headers_lowercase = {};
     this.url = null;
     this.method = null;
     this.body_len = 0;
@@ -16,6 +17,7 @@ function HTTPRequest() {
 function HTTPResponse() {
     this.start = null;
     this.headers = {};
+    this.headers_lowercase = {};
     this.status_code = null;
     this.body_len = 0;
     this.http_version = null;
@@ -92,6 +94,7 @@ HTTPSession.prototype.on_req_headers_complete = function (info) {
     var headers = info.headers || this.request_parser.headers;
     for (var i = 0; i < headers.length; i += 2) {
         this.request.headers[headers[i]] = headers[i + 1];
+        this.request.headers_lowercase[headers[i].toLowerCase()] = headers[i + 1];
     }
 
     this.request_count++;
@@ -116,6 +119,7 @@ HTTPSession.prototype.on_res_headers_complete = function (info) {
     var headers = info.headers || this.response_parser.headers;
     for (var i = 0; i < headers.length; i += 2) {
         this.response.headers[headers[i]] = headers[i + 1];
+        this.response.headers_lowercase[headers[i].toLowerCase()] = headers[i + 1];
     }
 
     // old websocket detect code. It would be nice to enable this again with a modern websocket decoder

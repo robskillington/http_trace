@@ -14,6 +14,7 @@ var pcap_session, ANSI, options = {};
 var forwarding = {};
 var log_stream = null;
 var ANSI = require("./ansi");
+var zlib = require("zlib");
 
 function lpad(num, len) {
     var str = num.toString();
@@ -87,24 +88,6 @@ function format_size(size) {
     }
 }
 
-function format_json(str) {
-    var obj;
-    try {
-        obj = JSON.parse(str);
-    } catch (err) {
-        return str;
-    }
-    var keys = Object.keys(obj).sort();
-
-    return keys.map(function (key) {
-        if (typeof obj[key] === "object") {
-            return "    " + ANSI.white(key) + inspect(obj[key]);
-        } else {
-            return "    " + ANSI.white(key) + ": " + ANSI.grey(obj[key]);
-        }
-    }).join("\n");
-}
-
 function usage_die(message) {
     if (message) {
         console.error("");
@@ -134,6 +117,8 @@ function usage_die(message) {
     console.error("    --headers                print all headers of request and response (def: off)");
     console.error("    --show-header            print only headers that match regex (def: off)");
     console.error("    --bodies                 print request and response bodies, if any (def: off)");
+    console.error("    --no-response-bodies     disable printing response bodies if printing bodies (def: off)");
+    console.error("    --no-decompress-bodies   disable decompressing response bodies if printing bodies (def: off)");
     console.error("    --tcp-verbose            display TCP events (def: off)");
     console.error("    --no-color               disable ANSI colors (def: pretty colors on)");
     console.error("");
@@ -175,6 +160,8 @@ function parse_options() {
         "headers": { multiple: false, has_value: false },
         "show-header": { multiple: true, has_value: true, regex: true },
         "bodies": { multiple: false, has_value: false },
+        "no-response-bodies": { multiple: false, has_value: false },
+        "no-decompress-bodies": { multiple: false, has_value: false },
         "tcp-verbose": { multiple: false, has_value: false },
         "no-color": { multiple: false, has_value: false },
         "forward": { multiple: false, has_value: true },
@@ -459,13 +446,8 @@ function on_tcp_session(tcp_session) {
             " #" + session.request_count + " HTTP " + session.request.http_version + " request body: " +
             format_size(data.length));
 
-        // TODO - need real binary_body check, more than just content-type
         if (options.bodies && !session.request.binary_body) {
-            if (session && session.request && session.request.headers && session.request.headers['content-type'] && session.request.headers["content-type"].match(/json/)) {
-                console.log(ANSI.green(data.toString("utf8")));
-            } else {
-                console.log(format_json(data.toString("utf8")));
-            }
+            console.log(ANSI.green(data.toString("utf8")));
         }
 
         if (options.forward) {
@@ -522,15 +504,39 @@ function on_tcp_session(tcp_session) {
             " #" + session.request_count + " HTTP " + session.response.http_version + " response body: " +
             format_size(data.length));
 
-        if (options.bodies && !session.response.binary_body) {
-            // TODO - this is not at all what you want for gzipped or binary data
-            console.log(ANSI.green(data.toString("utf8")));
+        if (options.bodies && !options["no-response-bodies"] && !session.response.binary_body) {
+            // TODO - this is not at all what you want for binary data
+            var headers = session.response.headers_lowercase;
+            var encoding = headers && typeof headers["content-encoding"] === 'string' && headers["content-encoding"].toLowerCase().trim();
+            if (!options["no-decompress-bodies"] && encoding == "gzip") {
+                if (!session.response.response_decoder) {
+                    session.response.response_decoder = zlib.createGunzip();
+                    session.response.response_decoder.on('data', function(data) {
+                        console.log(ANSI.green(data.toString("utf8")));
+                    });
+                }
+                session.response.response_decoder.write(data);
+            } else if (!options["no-decompress-bodies"] && encoding == "deflate") {
+                if (!session.response.response_decoder) {
+                    session.response.response_decoder = zlib.createDeflate();
+                    session.response.response_decoder.on('data', function(data) {
+                        console.log(ANSI.green(data.toString("utf8")));
+                    });
+                }
+                session.response.response_decoder.write(data);
+            } else {
+                console.log(ANSI.green(data.toString("utf8")));
+            }
         }
     });
 
     http_session.on("http response complete", function (session) {
         if (! filter_match(session)) {
             return;
+        }
+
+        if (session.response.response_decoder) {
+            session.response.response_decoder.close();
         }
 
         console.log(format_line_start(tcp_session, false) +
