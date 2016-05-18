@@ -13,6 +13,7 @@ var fs = require("fs");
 var pcap_session, ANSI, options = {};
 var forwarding = {};
 var log_stream = null;
+var log_diffs_stream = null;
 var ANSI = require("./ansi");
 var zlib = require("zlib");
 
@@ -125,9 +126,10 @@ function usage_die(message) {
     console.error("HTTP forwarding:");
     console.error("    --forward <host:port>           forward intercepted requests to a target");
     console.error("    --forward-url-rewrite <replace> rewrite the url filtered by the --url regex with String.replace format");
+    console.error("    --log-json-diffs <file>         log forwarded request responses diffs to JSON line separated log file");
     console.error("");
     console.error("HTTP logging:");
-    console.error("    --log-json <file>           log requests JSON formatted to line separated log file");
+    console.error("    --log-json <file>           log requests to JSON line separated log file");
     console.error("");
     console.error("Examples:");
     console.error("    http_trace -f \"tcp port 80\"");
@@ -166,6 +168,7 @@ function parse_options() {
         "no-color": { multiple: false, has_value: false },
         "forward": { multiple: false, has_value: true },
         "forward-url-rewrite": { multiple: false, has_value: true },
+        "log-json-diffs": { multiple: false, has_value: true },
         "log-json": { multiple: false, has_value: true },
         "help": { multiple: false, has_value: false }
     };
@@ -302,12 +305,36 @@ function setup_log(callback) {
         return callback();
     }
 
+    open_log(filename, function (err, stream) {
+        if (err) {
+            return callback(err);
+        }
+        log_stream = stream;
+        callback();
+    });
+}
+
+function setup_log_diffs(callback) {
+    var filename = options["log-json-diffs"];
+    if (!filename) {
+        return callback();
+    }
+
+    open_log(filename, function (err, stream) {
+        if (err) {
+            return callback(err);
+        }
+        log_diffs_stream = stream;
+        callback();
+    });
+}
+
+function open_log(filename, callback) {
     fs.open(filename, 'w+', function (err, fd) {
         if (err) {
             return callback('Unable to open file "' + filename + '": ' + err);
         }
-        log_stream = fs.createWriteStream(filename, {fd: fd});
-        callback();
+        callback(null, fs.createWriteStream(filename, {fd: fd}));
     });
 }
 
@@ -421,12 +448,56 @@ function on_tcp_session(tcp_session) {
             } else {
                 path = req.url;
             }
+            var completion_called = 0;
+            session.request_response_collected = function () {
+                completion_called++;
+                if (!log_diffs_stream || completion_called != 2) {
+                    return;
+                }
+                var response_body = session.request_response_data.toString('utf8');
+                var forward_response_body = session.forward_request_response_data.toString('utf8');
+                var exact_match =
+                        session.response_status_code === session.forward_request_response_status_code &&
+                        response_body === forward_response_body
+                var entry = {
+                    ts: Date.now(),
+                    url: req.url,
+                    forward_url: path,
+                    method: req.method,
+                    headers: req.headers,
+                    status_code: session.response_status_code,
+                    forward_status_code: session.forward_request_response_status_code,
+                    exact_match: exact_match
+                };
+                if (!exact_match) {
+                    entry.response_body = response_body;
+                    entry.forwarded_response_body = forward_response_body;
+                }
+                log_diffs_stream.write(JSON.stringify(entry) + '\n');
+            };
+            session.request_response_data = new Buffer('');
+            session.forward_request_response_data = new Buffer('');
+            console.log('creating session.request_response_data');
+            console.log(session.request_response_data);
             session.forward_request = node_http.request({
                 hostname: forwarding.host,
                 port: forwarding.port,
                 path: path,
                 method: req.method,
                 headers: req.headers
+            }, function onResponse(res) {
+                session.forward_request_response_status_code = res.statusCode;
+                res.on('data', function (chunk) {
+                    if (log_diffs_stream) {
+                        session.forward_request_response_data =
+                            Buffer.concat([session.forward_request_response_data, chunk]);
+                    }
+                });
+                res.on('end', function () {
+                    if (log_diffs_stream) {
+                        session.request_response_collected();
+                    }
+                });
             });
             session.forward_request.on('error', function onRequestError(e) {
                 console.error('forward request error: ' + e.message);
@@ -493,6 +564,8 @@ function on_tcp_session(tcp_session) {
 
         format_headers(res.headers);
         res.binary_body = binary_body_check(res.headers);
+
+        session.response_status_code = res.status_code;
     });
 
     http_session.on("http response body", function (session, data) {
@@ -528,6 +601,10 @@ function on_tcp_session(tcp_session) {
                 console.log(ANSI.green(data.toString("utf8")));
             }
         }
+
+        if (log_diffs_stream) {
+            session.request_response_data = Buffer.concat([session.request_response_data, data]);
+        }
     });
 
     http_session.on("http response complete", function (session) {
@@ -537,6 +614,10 @@ function on_tcp_session(tcp_session) {
 
         if (session.response.response_decoder) {
             session.response.response_decoder.close();
+        }
+
+        if (log_diffs_stream) {
+            session.request_response_collected();
         }
 
         console.log(format_line_start(tcp_session, false) +
@@ -560,7 +641,13 @@ setup_log(function (err) {
         console.err(err);
         return;
     }
-    start_capture_session();
-    start_drop_watcher();
-    setup_listeners();
+    setup_log_diffs(function (err) {
+        if (err) {
+            console.err(err);
+            return;
+        }
+        start_capture_session();
+        start_drop_watcher();
+        setup_listeners();
+    });
 });
