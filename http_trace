@@ -477,8 +477,6 @@ function on_tcp_session(tcp_session) {
             };
             session.request_response_data = new Buffer('');
             session.forward_request_response_data = new Buffer('');
-            console.log('creating session.request_response_data');
-            console.log(session.request_response_data);
             session.forward_request = node_http.request({
                 hostname: forwarding.host,
                 port: forwarding.port,
