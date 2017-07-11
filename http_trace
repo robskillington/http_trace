@@ -130,6 +130,7 @@ function usage_die(message) {
     console.error("");
     console.error("HTTP logging:");
     console.error("    --log-json <file>           log requests to JSON line separated log file");
+    console.error("    --log-json-bodies           log request and response bodies to log file");
     console.error("");
     console.error("Examples:");
     console.error("    http_trace -f \"tcp port 80\"");
@@ -170,6 +171,7 @@ function parse_options() {
         "forward-url-rewrite": { multiple: false, has_value: true },
         "log-json-diffs": { multiple: false, has_value: true },
         "log-json": { multiple: false, has_value: true },
+        "log-json-bodies": { multiple: false, has_value: false },
         "help": { multiple: false, has_value: false }
     };
 
@@ -441,6 +443,12 @@ function on_tcp_session(tcp_session) {
         format_headers(req.headers);
         req.binary_body = binary_body_check(req.headers);
 
+        if (options["log-json-bodies"]) {
+            session.request_data = new Buffer('');
+        }
+        if (options.forward || options["log-json-bodies"]) {
+            session.request_response_data = new Buffer('');
+        }
         if (options.forward) {
             var path;
             if (forwarding.rewrite) {
@@ -475,7 +483,6 @@ function on_tcp_session(tcp_session) {
                 }
                 log_diffs_stream.write(JSON.stringify(entry) + '\n');
             };
-            session.request_response_data = new Buffer('');
             session.forward_request_response_data = new Buffer('');
             session.forward_request = node_http.request({
                 hostname: forwarding.host,
@@ -519,6 +526,9 @@ function on_tcp_session(tcp_session) {
             console.log(ANSI.green(data.toString("utf8")));
         }
 
+        if (options["log-json-bodies"]) {
+            session.request_data = Buffer.concat([session.request_data, data]);
+        }
         if (options.forward) {
             session.forward_request.write(data);
         }
@@ -539,13 +549,13 @@ function on_tcp_session(tcp_session) {
             session.forward_request.end();
         }
 
-        if (log_stream) {
+        if (log_stream && !options["log-json-bodies"]) {
             var req = session.request;
             var entry = {
                 ts: Date.now(),
                 url: req.url,
                 method: req.method,
-                headers: req.headers
+                headers: req.headers,
             };
             log_stream.write(JSON.stringify(entry) + '\n');
         }
@@ -564,6 +574,7 @@ function on_tcp_session(tcp_session) {
         res.binary_body = binary_body_check(res.headers);
 
         session.response_status_code = res.status_code;
+        session.response_headers = res.headers;
     });
 
     http_session.on("http response body", function (session, data) {
@@ -600,7 +611,7 @@ function on_tcp_session(tcp_session) {
             }
         }
 
-        if (log_diffs_stream) {
+        if (log_diffs_stream || options["log-json-bodies"]) {
             session.request_response_data = Buffer.concat([session.request_response_data, data]);
         }
     });
@@ -608,6 +619,23 @@ function on_tcp_session(tcp_session) {
     http_session.on("http response complete", function (session) {
         if (! filter_match(session)) {
             return;
+        }
+
+        if (log_stream && options["log-json-bodies"]) {
+            var req = session.request;
+            var entry = {
+                ts: Date.now(),
+                url: req.url,
+                method: req.method,
+                headers: req.headers,
+                body: session.request_data.toString("utf8"),
+                response: {
+                    status: session.response_status_code,
+                    headers: session.response_headers,
+                    body: session.request_response_data.toString("utf8")
+                },
+            };
+            log_stream.write(JSON.stringify(entry) + '\n');
         }
 
         if (session.response.response_decoder) {
